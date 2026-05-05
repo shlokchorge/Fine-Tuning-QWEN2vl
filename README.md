@@ -3,6 +3,7 @@
 VisionTeX is a mathematical expression recognition system built by fine-tuning Qwen2-VL-7B-Instruct on the LaTeX OCR dataset using Unsloth and LoRA. Given an image of a mathematical expression, the model produces the corresponding LaTeX source code. The project covers the full pipeline — training, evaluation, a Gradio demo, and a merged model checkpoint for direct deployment.
 
 Live demo: https://huggingface.co/spaces/shlokchorge2929/visiontex
+<img width="1587" height="833" alt="image" src="https://github.com/user-attachments/assets/1971ed89-65eb-4072-b5e1-04d403d05f44" />
 
 ---
 
