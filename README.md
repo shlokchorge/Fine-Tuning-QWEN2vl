@@ -1,427 +1,126 @@
-# Fine-Tuning Qwen2-VL for LaTeX OCR
+# VisionTeX — LaTeX OCR via Fine-Tuned Qwen2-VL-7B
 
+VisionTeX is a mathematical expression recognition system built by fine-tuning Qwen2-VL-7B-Instruct on the LaTeX OCR dataset using Unsloth and LoRA. Given an image of a mathematical expression, the model produces the corresponding LaTeX source code. The project covers the full pipeline — training, evaluation, a Gradio demo, and a merged model checkpoint for direct deployment.
 
-<p align="center">
-  A parameter-efficient fine-tuning pipeline for <strong>Qwen2-VL</strong> (Vision-Language Model) that converts images of mathematical expressions and handwritten equations into structured <strong>LaTeX code</strong> — optimized for resource-constrained hardware using QLoRA and Unsloth.
-</p>
-
----
-
-## Table of Contents
-
-- [Overview](#overview)
-- [Features](#features)
-- [Project Structure](#project-structure)
-- [Requirements](#requirements)
-- [Installation & Setup](#installation--setup)
-- [How to Clone](#how-to-clone)
-- [Usage](#usage)
-- [Technical Details](#technical-details)
-- [Results](#results)
-- [Version & Compatibility](#version--compatibility)
-- [Troubleshooting](#troubleshooting)
-- [Contributing](#contributing)
-- [License](#license)
+Live demo: https://huggingface.co/spaces/shlokchorge2929/visiontex
 
 ---
 
-## Overview
+## What this project does
 
-Mathematical OCR (Optical Character Recognition) is a notoriously difficult task — handwritten or printed equations contain complex symbols, nested structures, and multi-line alignments that general-purpose models struggle with.
+The model takes an image containing mathematical notation and outputs LaTeX markup that, when compiled, reproduces that expression. This is useful for digitizing handwritten or printed equations from papers, textbooks, or scanned documents without manual transcription.
 
-This project fine-tunes **Qwen2-VL**, a state-of-the-art multimodal vision-language model, on the specific task of **LaTeX transcription from images**. By leveraging:
+The fine-tuning is not a tutorial wrapper. Every design choice is backed by a measured result:
 
-- **QLoRA** (Quantized Low-Rank Adaptation) for memory-efficient training
-- **Unsloth** for accelerated backward passes
-- **4-bit NormalFloat (NF4)** quantization for VRAM reduction
-
-...the model can be fine-tuned even on mid-range GPUs (like NVIDIA T4) while achieving significantly better performance than the base Qwen2-VL on complex mathematical structures.
-
----
-
-## Features
-
-- Fine-tuning of Qwen2-VL on image to LaTeX pairs
-- 4-bit quantization using BitsAndBytes (NF4 format)
-- LoRA adapter training via Hugging Face PEFT
-- Unsloth-optimized kernels for faster training and reduced memory
-- Multimodal chat template formatting for image-text inputs
-- Supports complex LaTeX output: matrices, Greek symbols, multi-line alignments
-- Inference pipeline included for immediate testing
-- Compatible with NVIDIA T4 (16GB) and A100 GPUs
+- LoRA rank sweep across r=8, r=16, r=32 with F1 comparison
+- Data augmentation pipeline (rotation, Gaussian noise, contrast jitter, blur) with before/after error rates
+- Cosine vs linear learning rate scheduler comparison — approximately 2% F1 difference quantified
+- Four evaluation metrics: Character Error Rate, Token F1, BLEU-4, and Exact Match
 
 ---
 
-## Project Structure
+## Repositories and how they connect
+
+**This repository — shlokchorge/Fine-Tuning-QWEN2vl**
+
+Contains the training notebook and the Gradio application that runs the demo.
+
+**Adapter checkpoint — shlokchorge2929/visiontex-qwen2vl**
+
+After training, Unsloth saves a LoRA adapter — a small set of weight differences rather than a full model copy. This adapter is roughly a few hundred MB compared to the full model's 14+ GB. The Gradio app (`app.py`) downloads only this adapter at startup, applies it on top of the base Qwen2-VL-7B-Instruct weights by computing `delta = B @ A` for each LoRA layer and adding it to the frozen base weights. This is the merge that happens in the loading section of `app.py`.
+
+**Merged checkpoint — shlokchorge2929/visiontex-qwen2vl-merged**
+
+This is the result of permanently folding the adapter into the base weights. Instead of loading two things and merging at runtime, you load one complete model. The weights are identical in value to what the adapter produces — the difference is purely operational: no merge step, no dependency on the base model checkpoint, faster cold start, and easier deployment. If you want to run inference without building the merge logic yourself, use this checkpoint directly with the standard Transformers pipeline.
+
+The relationship is: training produces the adapter, the adapter applied to the base produces the merged model, and the demo uses the adapter approach so it can be hosted without storing 14 GB on the Space.
+
+---
+
+## File structure
 
 ```
 Fine-Tuning-QWEN2vl/
-|
-|-- finetuningqwen_vl.ipynb       # Main Jupyter Notebook (training + inference)
-|-- README.md                     # Project documentation
-|
--- (outputs/)                     # Auto-generated after training
-    |-- lora_model/               # Saved LoRA adapter weights
-    -- logs/                      # Training logs
-```
-
-> **Note:** The dataset and model weights are loaded directly from Hugging Face Hub at runtime. No large files need to be committed to this repository.
-
----
-
-## Requirements
-
-### Hardware
-
-| Component | Minimum | Recommended |
-|-----------|---------|-------------|
-| GPU | NVIDIA T4 (16GB VRAM) | NVIDIA A100 (40/80GB) |
-| RAM | 16 GB | 32 GB+ |
-| Storage | 20 GB free | 50 GB free |
-
-### Software & Versions
-
-| Package | Version |
-|---------|---------|
-| Python | `3.10+` |
-| PyTorch | `2.1.0+` |
-| CUDA | `11.8` or `12.1` |
-| Transformers | `4.45.0+` |
-| PEFT | `0.12.0+` |
-| TRL | `0.11.0+` |
-| Unsloth | `2024.11+` |
-| BitsAndBytes | `0.43.0+` |
-| xformers | `0.0.27+` |
-
----
-
-## Installation & Setup
-
-### Step 1 — Set up a Python Virtual Environment (Recommended)
-
-```bash
-python -m venv venv
-source venv/bin/activate        # Linux/Mac
-# OR
-venv\Scripts\activate           # Windows
-```
-
-### Step 2 — Install Core Dependencies
-
-```bash
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-```
-
-### Step 3 — Install Hugging Face Stack
-
-```bash
-pip install transformers==4.45.0 \
-            peft==0.12.0 \
-            trl==0.11.0 \
-            bitsandbytes==0.43.3 \
-            accelerate \
-            datasets
-```
-
-### Step 4 — Install Unsloth (for optimized kernels)
-
-```bash
-pip install "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git"
-pip install xformers
-```
-
-### Step 5 — Install Jupyter (if running locally)
-
-```bash
-pip install jupyter notebook ipywidgets
-```
-
-### Step 6 — (Optional) Hugging Face Login
-
-If you plan to push your fine-tuned model to Hugging Face Hub:
-
-```bash
-pip install huggingface_hub
-huggingface-cli login
+│
+├── visiontex_train_t4.ipynb    Training notebook. Designed to run on T4 (15 GB)
+│                               at MAX_STEPS=500 or A100 40 GB for a full epoch.
+│                               Contains the augmentation pipeline, LoRA config,
+│                               SFT training loop, evaluation functions, and a
+│                               before/after comparison table.
+│
+├── app.py                      Gradio application. Loads the base model and
+│                               downloads the LoRA adapter from HuggingFace,
+│                               merges the weights at runtime, and exposes a UI
+│                               where you can upload an image, optionally paste
+│                               ground-truth LaTeX, and get predictions with
+│                               live Token F1 and CER scores.
+│
+└── requirements.txt            Python dependencies for running app.py locally.
 ```
 
 ---
 
-## How to Clone
+## How to use
 
-### Clone the Repository
+**Running the demo**
 
-```bash
-git clone https://github.com/shlokchorge2929/Fine-Tuning-QWEN2vl.git
-```
+The hosted demo is at https://huggingface.co/spaces/shlokchorge2929/visiontex. Upload an image of a mathematical expression, optionally paste the ground-truth LaTeX to compute metrics, and click Generate.
 
-### Navigate into the Project Directory
+**Running locally**
 
 ```bash
+git clone https://github.com/shlokchorge/Fine-Tuning-QWEN2vl.git
 cd Fine-Tuning-QWEN2vl
+pip install -r requirements.txt
+python app.py
 ```
 
-### (Optional) Check Out a Specific Version / Branch
+You need a GPU with at least 16 GB of VRAM for local inference. The app will download the base model and adapter automatically on first run. Set `HUGGING_FACE_HUB_TOKEN` in your environment if you run into rate limits.
 
-```bash
-# List all available branches
-git branch -a
+**Running training**
 
-# Switch to a specific branch
-git checkout <branch-name>
+Open `visiontex_train_t4.ipynb` in a Colab or Kaggle environment with a T4 GPU. The default config is set for T4 (MAX_STEPS=500, LoRA r=16, MAX_SEQ_LEN=1024, batch size 1). For a full training run, set `MAX_STEPS = None` and switch to an A100 40 GB instance.
 
-# Or clone a specific branch directly
-git clone -b <branch-name> https://github.com/shlokchorge2929/Fine-Tuning-QWEN2vl.git
-```
-
-### Verify the Clone
-
-```bash
-ls -la
-# You should see: finetuningqwen_vl.ipynb  README.md
-```
-
----
-
-## Usage
-
-### Option A — Run on Google Colab (Recommended for beginners)
-
-1. Open [Google Colab](https://colab.research.google.com/)
-2. Go to **File > Upload Notebook**
-3. Upload `finetuningqwen_vl.ipynb`
-4. Set runtime to **GPU** (T4 or A100 — Colab Pro recommended)
-5. Run all cells top to bottom
-
-### Option B — Run Locally with Jupyter
-
-```bash
-# After completing the installation steps above
-jupyter notebook finetuningqwen_vl.ipynb
-```
-
-### Option C — Run as a Script (Advanced)
-
-If you want to convert the notebook to a standalone Python script:
-
-```bash
-pip install nbconvert
-jupyter nbconvert --to script finetuningqwen_vl.ipynb
-python finetuningqwen_vl.py
-```
-
----
-
-### Key Configuration Parameters
-
-Inside the notebook, you can modify these parameters to customize training:
+**Using the merged model directly**
 
 ```python
-# Model configuration
-model_name = "Qwen/Qwen2-VL-7B-Instruct"   # Base model from HF Hub
-max_seq_length = 2048                         # Max token length
+from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
+import torch
 
-# QLoRA configuration
-load_in_4bit = True                           # Enable 4-bit quantization
-lora_rank = 16                                # LoRA rank (higher = more params)
-lora_alpha = 16                               # LoRA scaling factor
-lora_dropout = 0.05                           # Dropout for regularization
-
-# Training configuration
-num_train_epochs = 3                          # Number of training epochs
-per_device_train_batch_size = 2               # Batch size per GPU
-gradient_accumulation_steps = 4              # Effective batch = 2 x 4 = 8
-learning_rate = 2e-4                          # Learning rate
+model = Qwen2VLForConditionalGeneration.from_pretrained(
+    "shlokchorge2929/visiontex-qwen2vl-merged",
+    torch_dtype=torch.float16,
+    device_map="auto",
+)
+processor = AutoProcessor.from_pretrained("shlokchorge2929/visiontex-qwen2vl-merged")
 ```
+
+This loads the fully merged weights without any adapter merge step.
 
 ---
 
-### Running Inference
+## Why inference is slow and what hardware helps
 
-After training is complete, run inference on a new image:
+The base model, Qwen2-VL-7B, has seven billion parameters. Even in float16, the weights alone occupy around 14 GB of GPU memory. Before generating a single token the model must load those weights, encode the image through the vision encoder, and then run an autoregressive decode loop — each token requires a full forward pass through all layers.
 
-```python
-from PIL import Image
+On the HuggingFace Space the model runs on a CPU-only or shared GPU instance. CPU inference on a 7B model is roughly 50 to 100 times slower than a dedicated GPU. Even with a T4 (which has 16 GB VRAM), throughput is limited because the T4 has relatively low memory bandwidth and no bfloat16 support, so the model runs in float16 with slower attention.
 
-# Load your image
-image = Image.open("your_equation_image.png")
+The hardware that would make a meaningful difference:
 
-# Run inference
-messages = [
-    {
-        "role": "user",
-        "content": [
-            {"type": "image", "image": image},
-            {"type": "text", "text": "Convert this mathematical expression to LaTeX."}
-        ]
-    }
-]
+- A100 40 GB or 80 GB — the recommended card for this model class. Memory bandwidth is roughly 3x the T4, and bfloat16 is supported natively, which speeds up both training and inference.
+- RTX 4090 (24 GB) — a practical consumer alternative. Not as fast as an A100 for training but significantly faster than a T4 for inference.
+- H100 — the fastest available option, most relevant if you want to run full-epoch training with larger batch sizes.
 
-# The notebook's inference cell handles tokenization and generation
-output = model.generate(...)
-print(tokenizer.decode(output[0]))
-```
-
----
-
-## Technical Details
-
-### Quantization Strategy
-
-The model uses **4-bit NormalFloat (NF4)** quantization via BitsAndBytes, which:
-- Reduces VRAM consumption by ~75% compared to full precision (fp32)
-- Preserves model quality through information-theoretically optimal quantization
-- Enables fine-tuning of a 7B parameter model on a 16GB GPU
-
-```
-Qwen2-VL-7B (full fp32)  ~28 GB VRAM
-Qwen2-VL-7B (4-bit NF4)  ~6-8 GB VRAM (base load)
-```
-
-### LoRA Adapters
-
-Instead of updating all 7 billion parameters, **LoRA** injects small trainable adapter matrices into the attention layers:
-
-```
-Total trainable params (LoRA): ~10-40M (< 1% of 7B)
-Training speed gain: ~3-5x faster than full fine-tuning
-```
-
-### Unsloth Optimizations
-
-Unsloth provides custom CUDA kernels that:
-- Reduce memory usage during the backward pass by 60%
-- Speed up training throughput by 2-5x
-- Enable larger batch sizes without OOM errors
-
-### Memory Management
-
-| Technique | Memory Saved |
-|-----------|-------------|
-| 4-bit NF4 Quantization | ~75% vs fp32 |
-| xformers Flash Attention | ~30-40% attention memory |
-| Gradient Checkpointing | ~30% activation memory |
-| Unsloth Kernels | ~60% backward pass memory |
-
----
-
-## Results
-
-The fine-tuned model demonstrates measurable improvements over the base Qwen2-VL on mathematical transcription tasks:
-
-| Structure Type | Base Model | Fine-tuned Model |
-|----------------|-----------|-----------------|
-| Simple fractions | Good | Excellent |
-| Greek symbols | Moderate | Excellent |
-| Matrices | Poor | Good |
-| Multi-line alignments | Poor | Good |
-| Nested expressions | Moderate | Good |
-
-> The model successfully transcribes complex structures including matrices, Greek symbols, and multi-line `align` environments, maintaining LaTeX syntax integrity significantly better than the base model.
-
----
-
-## Version & Compatibility
-
-| Component | Version Used |
-|-----------|-------------|
-| Qwen2-VL Base Model | `Qwen2-VL-7B-Instruct` |
-| Python | `3.10` |
-| PyTorch | `2.1.x` |
-| Transformers | `4.45.x` |
-| PEFT | `0.12.x` |
-| TRL | `0.11.x` |
-| BitsAndBytes | `0.43.x` |
-| Unsloth | `2024.11+` |
-| CUDA | `12.1` |
-
-### Git Version Info
-
-```bash
-# Check your current version / commit
-git log --oneline -5
-
-# Pull the latest changes
-git pull origin main
-```
-
----
-
-## Troubleshooting
-
-### CUDA Out of Memory (OOM)
-
-```python
-# Reduce batch size
-per_device_train_batch_size = 1
-gradient_accumulation_steps = 8   # Keep effective batch size the same
-
-# Or reduce max sequence length
-max_seq_length = 1024
-```
-
-### BitsAndBytes Not Detecting GPU
-
-```bash
-# Reinstall with CUDA support explicitly
-pip install bitsandbytes --upgrade
-
-# Verify CUDA is visible
-python -c "import torch; print(torch.cuda.is_available())"
-```
-
-### Unsloth Installation Errors
-
-```bash
-# Try pip install with no build isolation
-pip install "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git" --no-build-isolation
-```
-
-### Notebook Kernel Crashes
-
-- Ensure you are using a GPU runtime (not CPU)
-- Restart the kernel and re-run from the top
-- Check available VRAM: `nvidia-smi`
+Quantization to 4-bit (which the training notebook already uses via Unsloth) reduces VRAM from ~14 GB to around 5-6 GB, making T4 inference possible at the cost of some quality. The hosted Space uses the unquantized adapter merge approach, which requires more memory and runs slower as a result.
 
 ---
 
 ## Contributing
 
-Contributions are welcome. Here is how to get started:
+If you want to help this project run faster and more reliably, hardware access is the primary constraint. Specifically:
 
-1. Fork this repository
-2. Clone your fork:
-   ```bash
-   git clone https://github.com/<your-username>/Fine-Tuning-QWEN2vl.git
-   ```
-3. Create a new branch for your feature:
-   ```bash
-   git checkout -b feature/your-feature-name
-   ```
-4. Make your changes and commit:
-   ```bash
-   git add .
-   git commit -m "feat: add your feature description"
-   ```
-5. Push to your fork:
-   ```bash
-   git push origin feature/your-feature-name
-   ```
-6. Open a Pull Request on GitHub
+- Access to an A100 or H100 instance (Google Cloud, Lambda Labs, RunPod, or similar) to run a full-epoch training run and produce a properly converged checkpoint. The current adapter was trained at MAX_STEPS=500 on a T4, which is a partial run.
+- Sponsoring compute credits on any major cloud provider so the Space can be upgraded to a GPU-backed instance and serve inference in reasonable time.
+- Contributions to the codebase: quantized inference paths (GPTQ, AWQ), faster attention (Flash Attention 2), or a lighter evaluation server that handles the adapter merge more efficiently.
 
----
-
-## License
-
-
-
-The base **Qwen2-VL** model is subject to its own license. Please review [Qwen2-VL's license on Hugging Face](https://huggingface.co/Qwen/Qwen2-VL-7B-Instruct) before commercial use.
-
----
-
-## Acknowledgements
-
-- [Qwen Team (Alibaba Cloud)](https://github.com/QwenLM/Qwen2-VL) for the base Qwen2-VL model
-- [Unsloth](https://github.com/unslothai/unsloth) for memory-efficient fine-tuning kernels
-- [Hugging Face](https://huggingface.co/) for PEFT, TRL, and Transformers libraries
-- [BitsAndBytes](https://github.com/TimDettmers/bitsandbytes) for quantization support
+If you have compute to offer or want to collaborate on any of the above, open an issue in this repository or reach out directly.
